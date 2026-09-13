@@ -1,6 +1,6 @@
 {
-  "name": "voltius-plugin-template",
-  "version": "1.0.0",
+  "name": "voltius-plugin-cloudflare-sync",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,8 +10,14 @@
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
-    "@voltius/plugin-types": "^0.15.0",
+    "@voltius/plugin-types": "^0.34.0",
     "esbuild": "^0.25.0",
     "typescript": "^5.6.0"
+  },
+  "description": "Voltius marketplace plugin: BYO Cloudflare Workers + R2 encrypted vault sync",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mrchatam/voltius-plugin-cloudflare-sync.git"
   }
 }
