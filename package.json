@@ -1,0 +1,17 @@
+{
+  "name": "voltius-plugin-template",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/index.tsx --bundle --platform=browser --format=esm --external:react --external:react/jsx-runtime --external:react-dom --external:@iconify/react --external:@voltius/ui --external:@voltius/api --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "check": "node scripts/check-externals.mjs"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@voltius/plugin-types": "^0.15.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

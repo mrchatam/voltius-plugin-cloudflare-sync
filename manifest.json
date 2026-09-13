@@ -1,0 +1,16 @@
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "version": "1.0.0",
+  "description": "A starting point for a Voltius plugin.",
+  "permissions": ["ui", "right-panel"],
+  "contributes": {
+    "configuration": {
+      "greeting": {
+        "type": "string",
+        "default": "Hello",
+        "description": "Text shown at the top of the panel."
+      }
+    }
+  }
+}

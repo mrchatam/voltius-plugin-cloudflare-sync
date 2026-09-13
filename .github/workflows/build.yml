@@ -1,0 +1,22 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  # Weekly, so drift in the host contract surfaces here rather than in a plugin
+  # author's editor weeks later.
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node scripts/check-externals.mjs
