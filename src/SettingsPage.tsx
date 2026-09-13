@@ -14,6 +14,14 @@ import {
   removeRemoteDevice,
 } from "./sync-engine";
 import { WorkerApiError, getHealth, getManifest, type WorkerDevice } from "./worker-api";
+import {
+  CloudflareDeployError,
+  DEFAULT_BUCKET_NAME,
+  DEFAULT_WORKER_NAME,
+  DEPLOY_TO_CLOUDFLARE_URL,
+  deployWorker,
+  generateSyncToken,
+} from "./cloudflare-deploy";
 
 type SaveState = import("@voltius/ui").SaveState;
 
@@ -81,21 +89,32 @@ export function createSettingsPage(api: PluginAPI) {
     const [deviceCount, setDeviceCount] = useState<number | null>(null);
     const [devices, setDevices] = useState<WorkerDevice[]>([]);
     const [localDeviceId, setLocalDeviceId] = useState<string | null>(null);
+    const [cfAccountId, setCfAccountId] = useState("");
+    const [cfApiToken, setCfApiToken] = useState(""); // React state only — not persisted
+    const [cfWorkerName, setCfWorkerName] = useState(DEFAULT_WORKER_NAME);
+    const [cfBucketName, setCfBucketName] = useState(DEFAULT_BUCKET_NAME);
+    const [deployBusy, setDeployBusy] = useState(false);
     const [, setTick] = useState(0);
 
     const refresh = useCallback(async () => {
-      const [url, tok, pass, poll, cfg] = await Promise.all([
+      const [url, tok, pass, poll, cfg, accountId, workerName, bucketName] = await Promise.all([
         api.storage.get<string>("workerUrl"),
         api.vault.get("syncToken"),
         api.vault.get("passphrase"),
         api.storage.get<number>("pollIntervalSeconds"),
         isConfigured(),
+        api.storage.get<string>("cfAccountId"),
+        api.storage.get<string>("cfWorkerName"),
+        api.storage.get<string>("cfBucketName"),
       ]);
       setWorkerUrl(url ?? "");
       setToken(tok ?? "");
       setPassphrase(pass ?? "");
       setPollSeconds(poll ?? 60);
       setConfigured(cfg);
+      setCfAccountId(accountId ?? "");
+      setCfWorkerName(workerName || DEFAULT_WORKER_NAME);
+      setCfBucketName(bucketName || DEFAULT_BUCKET_NAME);
       setTick((n) => n + 1);
       const localId = await getDeviceId();
       setLocalDeviceId(localId);
@@ -159,7 +178,7 @@ export function createSettingsPage(api: PluginAPI) {
         await refresh();
       } catch (err) {
         const msg =
-          err instanceof WorkerApiError
+          err instanceof WorkerApiError || err instanceof CloudflareDeployError
             ? err.message
             : err instanceof Error
               ? err.message
@@ -187,6 +206,148 @@ export function createSettingsPage(api: PluginAPI) {
             </p>
           </div>
         </div>
+
+        <section className="flex flex-col gap-3">
+          <h3 className="text-sm font-semibold text-(--t-text-primary)">Deploy Worker</h3>
+          <p className="text-xs text-(--t-text-dim)">
+            Deploy the sync Worker into your Cloudflare account from here (no Wrangler required).
+            API token stays in memory only. After deploy, use Create vault / Link below — deploy alone
+            does not mark the vault configured.
+          </p>
+          <Field
+            label="Cloudflare Account ID"
+            hint="Dashboard → Workers & Pages → Account ID (right sidebar)"
+          >
+            <input
+              className={textInputClass()}
+              value={cfAccountId}
+              onChange={(e) => {
+                setCfAccountId(e.target.value);
+                void api.storage.set("cfAccountId", e.target.value.trim());
+              }}
+              placeholder="32-char hex account id"
+              autoComplete="off"
+            />
+          </Field>
+          <Field
+            label="Cloudflare API token"
+            hint="Permissions: Workers Scripts Edit, Workers R2 Storage Edit, Account Settings Read. Not saved."
+          >
+            <input
+              type="password"
+              className={textInputClass()}
+              value={cfApiToken}
+              onChange={(e) => setCfApiToken(e.target.value)}
+              placeholder="API token (kept in memory only)"
+              autoComplete="off"
+            />
+          </Field>
+          <Field label="Worker name" hint={`Default: ${DEFAULT_WORKER_NAME}`}>
+            <input
+              className={textInputClass()}
+              value={cfWorkerName}
+              onChange={(e) => {
+                setCfWorkerName(e.target.value);
+                void api.storage.set("cfWorkerName", e.target.value.trim() || DEFAULT_WORKER_NAME);
+              }}
+              placeholder={DEFAULT_WORKER_NAME}
+            />
+          </Field>
+          <Field label="R2 bucket name" hint={`Default: ${DEFAULT_BUCKET_NAME} (created if missing)`}>
+            <input
+              className={textInputClass()}
+              value={cfBucketName}
+              onChange={(e) => {
+                setCfBucketName(e.target.value);
+                void api.storage.set("cfBucketName", e.target.value.trim() || DEFAULT_BUCKET_NAME);
+              }}
+              placeholder={DEFAULT_BUCKET_NAME}
+            />
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <Btn
+              variant="secondary"
+              disabled={busy || deployBusy}
+              onClick={() => {
+                const next = generateSyncToken();
+                setToken(next);
+                void api.vault.set("syncToken", next);
+                api.notifications.toast("Generated sync token (saved to vault)", { severity: "success" });
+              }}
+            >
+              Generate sync token
+            </Btn>
+            <Btn
+              disabled={
+                busy ||
+                deployBusy ||
+                !cfAccountId.trim() ||
+                !cfApiToken.trim() ||
+                !token.trim()
+              }
+              onClick={() =>
+                void (async () => {
+                  setDeployBusy(true);
+                  setError(null);
+                  setMessage(null);
+                  try {
+                    const result = await deployWorker(api.http, {
+                      accountId: cfAccountId,
+                      apiToken: cfApiToken,
+                      workerName: cfWorkerName,
+                      bucketName: cfBucketName,
+                      syncToken: token,
+                    });
+                                        if (result.workerUrl) {
+                      setWorkerUrl(result.workerUrl);
+                      await api.storage.set("workerUrl", result.workerUrl.replace(/\/+$/, ""));
+                      setMessage(`Worker deployed: ${result.workerUrl}`);
+                      api.notifications.toast("Worker deployed", { severity: "success" });
+                    } else {
+                      setMessage(
+                        "Worker script and SYNC_TOKEN deployed, but workers.dev subdomain could not be resolved (need Account Settings Read). Paste the Worker URL from the Cloudflare dashboard into Worker URL below.",
+                      );
+                      api.notifications.toast("Deployed — paste Worker URL manually", {
+                        severity: "warning",
+                      });
+                    }
+                    await refresh();
+                  } catch (err) {
+                    const msg =
+                      err instanceof CloudflareDeployError || err instanceof Error
+                        ? err.message
+                        : String(err);
+                    setError(msg);
+                    api.notifications.toast("Deploy failed", { severity: "error" });
+                  } finally {
+                    setDeployBusy(false);
+                  }
+                })()
+              }
+            >
+              {deployBusy ? "Deploying…" : "Deploy Worker"}
+            </Btn>
+            <Btn
+              variant="secondary"
+              disabled={busy || deployBusy}
+              onClick={() =>
+                void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(DEPLOY_TO_CLOUDFLARE_URL);
+                    api.notifications.toast("Deploy-to-Cloudflare URL copied", { severity: "success" });
+                  } catch {
+                    setMessage(`Copy this URL: ${DEPLOY_TO_CLOUDFLARE_URL}`);
+                    api.notifications.toast("Could not access clipboard — URL shown below", {
+                      severity: "info",
+                    });
+                  }
+                })()
+              }
+            >
+              Copy Deploy-to-Cloudflare URL
+            </Btn>
+          </div>
+        </section>
 
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold text-(--t-text-primary)">Connection</h3>
@@ -373,24 +534,9 @@ export function createSettingsPage(api: PluginAPI) {
         {error ? <p className="text-sm text-(--t-status-error)">{error}</p> : null}
 
         <p className="text-[11px] text-(--t-text-dim)">
-          Deploy the Worker:{" "}
-          <a
-            className="underline"
-            href="https://github.com/mrchatam/voltius-cloudflare-sync-worker"
-            target="_blank"
-            rel="noreferrer"
-          >
-            mrchatam/voltius-cloudflare-sync-worker
-          </a>{" "}
-          ·{" "}
-          <a
-            className="underline"
-            href="https://github.com/VoltiusApp/voltius/issues/267"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Voltius#267
-          </a>
+          Worker source: mrchatam/voltius-cloudflare-sync-worker · Tracking: VoltiusApp/voltius#267
+          (marketplace-only). Prefer <strong className="font-medium">Deploy Worker</strong> above;
+          use Copy Deploy-to-Cloudflare URL if you want the dashboard flow.
         </p>
       </div>
     );
