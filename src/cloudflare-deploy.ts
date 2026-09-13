@@ -302,11 +302,8 @@ export async function deployWorker(
 
   try {
     await enableWorkersDev(http, accountId, apiToken, workerName);
-  } catch (err) {
-    // Non-fatal if subdomain enable fails; URL resolve may still work.
-    if (!(err instanceof CloudflareDeployError && (err.status === 400 || err.status === 404))) {
-      throw err;
-    }
+  } catch {
+    // Non-fatal: script + secret already uploaded; URL resolve / manual paste still work.
   }
 
   const subdomain = await getWorkersSubdomain(http, accountId, apiToken);
