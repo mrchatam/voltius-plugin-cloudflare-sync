@@ -10,6 +10,21 @@ Marketplace plugin that syncs your **encrypted** Voltius vault through a **bring
 
 Tracking: [VoltiusApp/voltius#267](https://github.com/VoltiusApp/voltius/issues/267) (marketplace-only; core PR #268 closed).
 
+
+## Why Cloudflare Sync instead of Gist?
+
+Gist Sync is still the simplest path if you already have GitHub. Choose **Cloudflare Sync** when you want:
+
+| | Cloudflare Sync | Gist Sync |
+|---|---|---|
+| Storage you control | Your R2 bucket | GitHub Gist |
+| Account required | Cloudflare | GitHub + PAT |
+| Deploy | In-app (API token) or Deploy-to-Cloudflare | Paste gist token |
+| Backend shape | Dedicated Worker API + ETag concurrency | Gist file API |
+| Encryption | Client-side E2EE (passphrase) | Client-side E2EE (passphrase) |
+
+Both keep encryption on-device. This plugin is for self-hosters who prefer Cloudflare infra over GitHub as the sync transport.
+
 ## Install (dev)
 
 ```bash

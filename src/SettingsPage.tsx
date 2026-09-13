@@ -207,6 +207,38 @@ export function createSettingsPage(api: PluginAPI) {
           </div>
         </div>
 
+        <section className="flex flex-col gap-2 rounded-lg border border-(--t-border) bg-(--t-bg-elevated) px-3 py-3">
+          <h3 className="text-sm font-semibold text-(--t-text-primary)">
+            Why Cloudflare Sync instead of Gist?
+          </h3>
+          <p className="text-[11px] text-(--t-text-dim)">
+            Gist Sync is great when you already live on GitHub. Prefer this when you want your own
+            cloud:
+          </p>
+          <ul className="list-disc pl-4 text-sm text-(--t-text-muted) space-y-1">
+            <li>
+              <strong className="font-medium text-(--t-text-primary)">You own the store</strong> —
+              ciphertext lives in your R2 bucket, not on GitHub Gists.
+            </li>
+            <li>
+              <strong className="font-medium text-(--t-text-primary)">No GitHub PAT</strong> — no
+              gist scopes or GitHub account required for sync.
+            </li>
+            <li>
+              <strong className="font-medium text-(--t-text-primary)">Built for objects</strong> —
+              R2 is object storage (limits suited to vault blobs), not a gist file API.
+            </li>
+            <li>
+              <strong className="font-medium text-(--t-text-primary)">Deploy from Voltius</strong> —
+              create Worker + bucket + sync token from Settings without leaving the app.
+            </li>
+            <li>
+              <strong className="font-medium text-(--t-text-primary)">Same E2EE model</strong> —
+              passphrase stays on-device; Worker sees ciphertext only (like Gist Sync).
+            </li>
+          </ul>
+        </section>
+
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold text-(--t-text-primary)">Deploy Worker</h3>
           <p className="text-xs text-(--t-text-dim)">
