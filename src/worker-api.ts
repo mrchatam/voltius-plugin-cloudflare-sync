@@ -1,6 +1,4 @@
-import type { PluginAPI } from "@voltius/plugin-types";
-
-type Http = PluginAPI["http"];
+import { parseJson, send, type Http, type HttpResult } from "./http";
 
 export type WorkerDevice = {
   id: string;
@@ -47,24 +45,30 @@ function headers(token: string, ifMatch?: string | null): HeadersInit {
   return h;
 }
 
-async function checkResponse(res: Response, context: string): Promise<void> {
+function checkResponse(res: HttpResult, context: string): void {
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText);
-    let message = text;
-    try {
-      const parsed = JSON.parse(text) as { message?: string; error?: string };
-      message = parsed.message ?? parsed.error ?? text;
-    } catch {
-      /* keep raw text */
-    }
+    const parsed = parseJson<{ message?: string; error?: string }>(res.body);
+    const message = parsed?.message ?? parsed?.error ?? res.body;
     throw new WorkerApiError(res.status, `${context}: ${message}`);
   }
 }
 
+async function call<T>(
+  http: Http,
+  workerUrl: string,
+  path: string,
+  context: string,
+  init: RequestInit = {},
+): Promise<{ data: T; res: HttpResult }> {
+  const res = await send(http, `${normalizeBaseUrl(workerUrl)}${path}`, init);
+  checkResponse(res, context);
+  const data = parseJson<T>(res.body);
+  if (data === null) throw new WorkerApiError(res.status, `${context}: response is not JSON`);
+  return { data, res };
+}
+
 export async function getHealth(http: Http, workerUrl: string): Promise<{ ok: boolean; version: number }> {
-  const res = await http.stream(`${normalizeBaseUrl(workerUrl)}/health`);
-  await checkResponse(res, "getHealth");
-  return res.json();
+  return (await call<{ ok: boolean; version: number }>(http, workerUrl, "/health", "getHealth")).data;
 }
 
 export async function getManifestWithEtag(
@@ -72,12 +76,10 @@ export async function getManifestWithEtag(
   workerUrl: string,
   token: string,
 ): Promise<ManifestGetResult> {
-  const res = await http.stream(`${normalizeBaseUrl(workerUrl)}/v1/manifest`, {
+  const { data, res } = await call<WorkerManifest>(http, workerUrl, "/v1/manifest", "getManifest", {
     headers: headers(token),
   });
-  await checkResponse(res, "getManifest");
-  const manifest = (await res.json()) as WorkerManifest;
-  return { manifest, etag: res.headers.get("ETag") };
+  return { manifest: data, etag: res.headers.get("ETag") };
 }
 
 export async function getManifest(
@@ -95,13 +97,16 @@ export async function putManifest(
   manifest: WorkerManifest,
   opts: { ifMatch?: string | null } = {},
 ): Promise<WorkerManifest> {
-  const res = await http.stream(`${normalizeBaseUrl(workerUrl)}/v1/manifest`, {
+  const { data } = await call<WorkerManifest>(http, workerUrl, "/v1/manifest", "putManifest", {
     method: "PUT",
     headers: headers(token, opts.ifMatch),
     body: JSON.stringify(manifest),
   });
-  await checkResponse(res, "putManifest");
-  return res.json();
+  return data;
+}
+
+function devicePath(deviceId: string): string {
+  return `/v1/devices/${encodeURIComponent(deviceId)}`;
 }
 
 export async function getDeviceBlob(
@@ -110,12 +115,13 @@ export async function getDeviceBlob(
   token: string,
   deviceId: string,
 ): Promise<string> {
-  const res = await http.stream(
-    `${normalizeBaseUrl(workerUrl)}/v1/devices/${encodeURIComponent(deviceId)}`,
+  const { data } = await call<{ content: string }>(
+    http,
+    workerUrl,
+    devicePath(deviceId),
+    `getDeviceBlob(${deviceId})`,
     { headers: headers(token) },
   );
-  await checkResponse(res, `getDeviceBlob(${deviceId})`);
-  const data = (await res.json()) as { content: string };
   return data.content;
 }
 
@@ -145,15 +151,11 @@ export async function putDeviceBlob(
   body: { content: string; label: string; pushedAt: string },
   opts: { ifMatch?: string | null } = {},
 ): Promise<void> {
-  const res = await http.stream(
-    `${normalizeBaseUrl(workerUrl)}/v1/devices/${encodeURIComponent(deviceId)}`,
-    {
-      method: "PUT",
-      headers: headers(token, opts.ifMatch),
-      body: JSON.stringify(body),
-    },
-  );
-  await checkResponse(res, `putDeviceBlob(${deviceId})`);
+  await call(http, workerUrl, devicePath(deviceId), `putDeviceBlob(${deviceId})`, {
+    method: "PUT",
+    headers: headers(token, opts.ifMatch),
+    body: JSON.stringify(body),
+  });
 }
 
 export async function deleteDevice(
@@ -162,12 +164,8 @@ export async function deleteDevice(
   token: string,
   deviceId: string,
 ): Promise<void> {
-  const res = await http.stream(
-    `${normalizeBaseUrl(workerUrl)}/v1/devices/${encodeURIComponent(deviceId)}`,
-    {
-      method: "DELETE",
-      headers: headers(token),
-    },
-  );
-  await checkResponse(res, `deleteDevice(${deviceId})`);
+  await call(http, workerUrl, devicePath(deviceId), `deleteDevice(${deviceId})`, {
+    method: "DELETE",
+    headers: headers(token),
+  });
 }

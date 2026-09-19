@@ -35,7 +35,7 @@ async function hostSpecifiers() {
 }
 
 const allowed = new Set(await hostSpecifiers());
-const bundle = readFileSync(new URL("../dist/index.js", import.meta.url), "utf8");
+const bundle = readFileSync(new URL("../index.js", import.meta.url), "utf8");
 const imported = new Set(
   [...bundle.matchAll(/from\s*"([^"]+)"/g)]
     .map((m) => m[1])

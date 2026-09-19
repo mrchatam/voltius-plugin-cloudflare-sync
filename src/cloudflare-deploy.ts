@@ -1,14 +1,7 @@
-import type { PluginAPI } from "@voltius/plugin-types";
-
-type Http = PluginAPI["http"];
+import WORKER_SCRIPT from "../dist/worker.mjs";
+import { parseJson, send, type Http, type HttpResult } from "./http";
 
 const CF_API = "https://api.cloudflare.com/client/v4";
-
-/** Prefer latest release asset; fall back to a pinned tag if latest 404s. */
-export const WORKER_ARTIFACT_URLS = [
-  "https://github.com/mrchatam/voltius-cloudflare-sync-worker/releases/latest/download/worker.mjs",
-  "https://github.com/mrchatam/voltius-cloudflare-sync-worker/releases/download/v0.2.0/worker.mjs",
-] as const;
 
 export const DEPLOY_TO_CLOUDFLARE_URL =
   "https://deploy.workers.cloudflare.com/?url=https://github.com/mrchatam/voltius-cloudflare-sync-worker";
@@ -62,14 +55,20 @@ function formatCfErrors(payload: CfEnvelope<unknown> | null, fallback: string): 
   return fallback;
 }
 
-async function readCfJson<T>(res: Response, context: string): Promise<T> {
-  const text = await res.text().catch(() => "");
-  let payload: CfEnvelope<T> | null = null;
-  try {
-    payload = text ? (JSON.parse(text) as CfEnvelope<T>) : null;
-  } catch {
-    /* keep null */
-  }
+function accountUrl(accountId: string, path: string): string {
+  return `${CF_API}/accounts/${encodeURIComponent(accountId)}${path}`;
+}
+
+async function cfCall<T>(
+  http: Http,
+  url: string,
+  context: string,
+  init: RequestInit,
+  tolerate?: (res: HttpResult, payload: CfEnvelope<T> | null) => boolean,
+): Promise<T | null> {
+  const res = await send(http, url, init);
+  const payload = parseJson<CfEnvelope<T>>(res.body);
+  if (tolerate?.(res, payload)) return null;
 
   if (res.status === 401 || res.status === 403) {
     throw new CloudflareDeployError(
@@ -77,97 +76,69 @@ async function readCfJson<T>(res: Response, context: string): Promise<T> {
       `${context}: Cloudflare rejected the API token (${res.status}). Check Workers Scripts Edit, Workers R2 Storage Edit, and Account Settings Read.`,
     );
   }
-
   if (!res.ok || payload?.success === false) {
-    const detail = formatCfErrors(payload, text || res.statusText);
-    throw new CloudflareDeployError(res.status, `${context}: ${detail}`);
+    throw new CloudflareDeployError(res.status, `${context}: ${formatCfErrors(payload, res.body)}`);
   }
-
-  return (payload?.result ?? (null as unknown as T)) as T;
+  return payload?.result ?? null;
 }
 
-/** High-entropy sync token suitable for Worker SYNC_TOKEN. */
 export function generateSyncToken(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
-  // base64url without padding
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export async function fetchWorkerArtifact(http: Http): Promise<string> {
-  let lastErr: Error | null = null;
-  for (const url of WORKER_ARTIFACT_URLS) {
-    try {
-      const res = await http.stream(url, { method: "GET" });
-      if (!res.ok) {
-        lastErr = new Error(`HTTP ${res.status} fetching ${url}`);
-        continue;
-      }
-      const text = await res.text();
-      if (!text.includes("export") || text.length < 100) {
-        lastErr = new Error(`Artifact from ${url} looks empty or invalid`);
-        continue;
-      }
-      return text;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-    }
-  }
-  throw new CloudflareDeployError(
-    0,
-    `Could not download Worker artifact. ${lastErr?.message ?? "Unknown error"}`,
-  );
+export function buildMultipart(
+  parts: Array<{ name: string; filename?: string; contentType: string; content: string }>,
+): { body: string; contentType: string } {
+  let boundary = "";
+  do {
+    boundary = `----voltius-${crypto.randomUUID()}`;
+  } while (parts.some((p) => p.content.includes(boundary)));
+
+  const body =
+    parts
+      .map((p) => {
+        const filename = p.filename ? `; filename="${p.filename}"` : "";
+        return (
+          `--${boundary}\r\n` +
+          `Content-Disposition: form-data; name="${p.name}"${filename}\r\n` +
+          `Content-Type: ${p.contentType}\r\n\r\n` +
+          `${p.content}\r\n`
+        );
+      })
+      .join("") + `--${boundary}--\r\n`;
+  return { body, contentType: `multipart/form-data; boundary=${boundary}` };
 }
 
-/** Create R2 bucket; ignore already-exists (HTTP 409 / CF code 10004-ish). */
 export async function ensureR2Bucket(
   http: Http,
   accountId: string,
   apiToken: string,
   bucketName: string,
 ): Promise<void> {
-  const res = await http.stream(`${CF_API}/accounts/${encodeURIComponent(accountId)}/r2/buckets`, {
-    method: "POST",
-    headers: authHeaders(apiToken, { "Content-Type": "application/json" }),
-    body: JSON.stringify({ name: bucketName }),
-  });
-
-  if (res.status === 409) return;
-
-  const text = await res.text().catch(() => "");
-  let payload: CfEnvelope<unknown> | null = null;
-  try {
-    payload = text ? (JSON.parse(text) as CfEnvelope<unknown>) : null;
-  } catch {
-    /* ignore */
-  }
-
-  // Cloudflare sometimes returns 400 with "already exists" / code 10004
-  const joined = formatCfErrors(payload, text).toLowerCase();
-  if (
-    res.status === 400 &&
-    (joined.includes("already exists") ||
-      joined.includes("bucket already") ||
-      payload?.errors?.some((e) => e.code === 10004 || e.code === 10007))
-  ) {
-    return;
-  }
-
-  if (res.status === 401 || res.status === 403) {
-    throw new CloudflareDeployError(
-      res.status,
-      `ensureR2Bucket: Cloudflare rejected the API token (${res.status}). Need Workers R2 Storage Edit.`,
-    );
-  }
-
-  if (!res.ok || payload?.success === false) {
-    throw new CloudflareDeployError(
-      res.status,
-      `ensureR2Bucket: ${formatCfErrors(payload, text || res.statusText)}`,
-    );
-  }
+  await cfCall(
+    http,
+    accountUrl(accountId, "/r2/buckets"),
+    "ensureR2Bucket",
+    {
+      method: "POST",
+      headers: authHeaders(apiToken, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ name: bucketName }),
+    },
+    (res, payload) => {
+      if (res.status === 409) return true;
+      const joined = formatCfErrors(payload, res.body).toLowerCase();
+      return (
+        res.status === 400 &&
+        (joined.includes("already exists") ||
+          joined.includes("bucket already") ||
+          !!payload?.errors?.some((e) => e.code === 10004 || e.code === 10007))
+      );
+    },
+  );
 }
 
 async function uploadWorkerScript(
@@ -176,7 +147,6 @@ async function uploadWorkerScript(
   apiToken: string,
   workerName: string,
   bucketName: string,
-  script: string,
   syncToken: string,
 ): Promise<void> {
   const metadata = {
@@ -184,42 +154,30 @@ async function uploadWorkerScript(
     compatibility_date: WORKER_COMPATIBILITY_DATE,
     compatibility_flags: [...WORKER_COMPATIBILITY_FLAGS],
     bindings: [
-      {
-        type: "r2_bucket",
-        name: "VAULT_BUCKET",
-        bucket_name: bucketName,
-      },
-      {
-        type: "secret_text",
-        name: "SYNC_TOKEN",
-        text: syncToken,
-      },
+      { type: "r2_bucket", name: "VAULT_BUCKET", bucket_name: bucketName },
+      { type: "secret_text", name: "SYNC_TOKEN", text: syncToken },
     ],
   };
 
-  const form = new FormData();
-  form.append(
-    "metadata",
-    new Blob([JSON.stringify(metadata)], { type: "application/json" }),
-  );
-  form.append(
-    WORKER_MODULE_NAME,
-    new Blob([script], { type: "application/javascript+module" }),
-    WORKER_MODULE_NAME,
-  );
-
-  const res = await http.stream(
-    `${CF_API}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}`,
+  // The host sends request bodies as strings, so FormData cannot be used here.
+  const { body, contentType } = buildMultipart([
+    { name: "metadata", contentType: "application/json", content: JSON.stringify(metadata) },
     {
-      method: "PUT",
-      headers: authHeaders(apiToken),
-      body: form,
+      name: WORKER_MODULE_NAME,
+      filename: WORKER_MODULE_NAME,
+      contentType: "application/javascript+module",
+      content: WORKER_SCRIPT,
     },
+  ]);
+
+  await cfCall(
+    http,
+    accountUrl(accountId, `/workers/scripts/${encodeURIComponent(workerName)}`),
+    "uploadWorkerScript",
+    { method: "PUT", headers: authHeaders(apiToken, { "Content-Type": contentType }), body },
   );
-  await readCfJson(res, "uploadWorkerScript");
 }
 
-/** Put / update SYNC_TOKEN secret (idempotent). */
 export async function putWorkerSecret(
   http: Http,
   accountId: string,
@@ -228,15 +186,16 @@ export async function putWorkerSecret(
   name: string,
   text: string,
 ): Promise<void> {
-  const res = await http.stream(
-    `${CF_API}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}/secrets`,
+  await cfCall(
+    http,
+    accountUrl(accountId, `/workers/scripts/${encodeURIComponent(workerName)}/secrets`),
+    "putWorkerSecret",
     {
       method: "PUT",
       headers: authHeaders(apiToken, { "Content-Type": "application/json" }),
       body: JSON.stringify({ name, text, type: "secret_text" }),
     },
   );
-  await readCfJson(res, "putWorkerSecret");
 }
 
 export async function getWorkersSubdomain(
@@ -244,17 +203,14 @@ export async function getWorkersSubdomain(
   accountId: string,
   apiToken: string,
 ): Promise<string | null> {
-  const res = await http.stream(
-    `${CF_API}/accounts/${encodeURIComponent(accountId)}/workers/subdomain`,
-    {
-      method: "GET",
-      headers: authHeaders(apiToken),
-    },
+  const result = await cfCall<{ subdomain?: string }>(
+    http,
+    accountUrl(accountId, "/workers/subdomain"),
+    "getWorkersSubdomain",
+    { method: "GET", headers: authHeaders(apiToken) },
+    (res) => res.status === 404,
   );
-  if (res.status === 404) return null;
-  const result = await readCfJson<{ subdomain?: string }>(res, "getWorkersSubdomain");
-  const sub = result?.subdomain?.trim();
-  return sub || null;
+  return result?.subdomain?.trim() || null;
 }
 
 export async function enableWorkersDev(
@@ -263,23 +219,19 @@ export async function enableWorkersDev(
   apiToken: string,
   workerName: string,
 ): Promise<void> {
-  const res = await http.stream(
-    `${CF_API}/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(workerName)}/subdomain`,
+  await cfCall(
+    http,
+    accountUrl(accountId, `/workers/scripts/${encodeURIComponent(workerName)}/subdomain`),
+    "enableWorkersDev",
     {
       method: "POST",
       headers: authHeaders(apiToken, { "Content-Type": "application/json" }),
       body: JSON.stringify({ enabled: true }),
     },
+    (res) => res.status === 404,
   );
-  // Some accounts already have it enabled; treat success / noop.
-  if (res.status === 404) return;
-  await readCfJson(res, "enableWorkersDev");
 }
 
-/**
- * Full deploy: ensure R2 → fetch artifact → upload Worker (+ SYNC_TOKEN) →
- * enable workers.dev → resolve URL.
- */
 export async function deployWorker(
   http: Http,
   input: DeployWorkerInput,
@@ -287,7 +239,9 @@ export async function deployWorker(
   const accountId = input.accountId.trim();
   const apiToken = input.apiToken.trim();
   const workerName = (input.workerName.trim() || DEFAULT_WORKER_NAME).replace(/[^a-zA-Z0-9_-]/g, "-");
-  const bucketName = (input.bucketName.trim() || DEFAULT_BUCKET_NAME).replace(/[^a-zA-Z0-9_-]/g, "-");
+  const bucketName = (input.bucketName.trim() || DEFAULT_BUCKET_NAME)
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-");
   const syncToken = input.syncToken.trim();
 
   if (!accountId) throw new CloudflareDeployError(0, "Cloudflare Account ID is required");
@@ -295,29 +249,18 @@ export async function deployWorker(
   if (!syncToken) throw new CloudflareDeployError(0, "Sync token is required before deploy");
 
   await ensureR2Bucket(http, accountId, apiToken, bucketName);
-  const script = await fetchWorkerArtifact(http);
-  await uploadWorkerScript(http, accountId, apiToken, workerName, bucketName, script, syncToken);
-  // Secrets API as belt-and-suspenders (upload also sets secret_text binding).
+  await uploadWorkerScript(http, accountId, apiToken, workerName, bucketName, syncToken);
   await putWorkerSecret(http, accountId, apiToken, workerName, "SYNC_TOKEN", syncToken);
 
   try {
     await enableWorkersDev(http, accountId, apiToken, workerName);
   } catch {
-    // Non-fatal: script + secret already uploaded; URL resolve / manual paste still work.
+    // Non-fatal: the script and secret are uploaded; the URL can still be pasted by hand.
   }
 
   const subdomain = await getWorkersSubdomain(http, accountId, apiToken);
   if (subdomain) {
-    return {
-      workerUrl: `https://${workerName}.${subdomain}.workers.dev`,
-      subdomain,
-    };
+    return { workerUrl: `https://${workerName}.${subdomain}.workers.dev`, subdomain };
   }
-
-  // Subdomain API unavailable (often missing Account Settings Read). Caller should prompt
-  // the user to paste the workers.dev URL from the Cloudflare dashboard.
-  return {
-    workerUrl: "",
-    subdomain: null,
-  };
+  return { workerUrl: "", subdomain: null };
 }

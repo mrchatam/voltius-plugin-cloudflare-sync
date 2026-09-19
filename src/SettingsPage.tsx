@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Icon, useAutosave } from "@voltius/ui";
+import { Icon } from "@voltius/ui";
 import type { PluginAPI } from "@voltius/plugin-types";
 import {
   disconnect,
@@ -22,8 +22,6 @@ import {
   deployWorker,
   generateSyncToken,
 } from "./cloudflare-deploy";
-
-type SaveState = import("@voltius/ui").SaveState;
 
 function Btn({
   children,
@@ -94,28 +92,16 @@ export function createSettingsPage(api: PluginAPI) {
     const [cfWorkerName, setCfWorkerName] = useState(DEFAULT_WORKER_NAME);
     const [cfBucketName, setCfBucketName] = useState(DEFAULT_BUCKET_NAME);
     const [deployBusy, setDeployBusy] = useState(false);
-    const [, setTick] = useState(0);
 
+    // Only reads status: the connection inputs stay as typed until Create vault / Link existing
+    // validates and persists them.
     const refresh = useCallback(async () => {
-      const [url, tok, pass, poll, cfg, accountId, workerName, bucketName] = await Promise.all([
+      const [url, tok, cfg] = await Promise.all([
         api.storage.get<string>("workerUrl"),
         api.vault.get("syncToken"),
-        api.vault.get("passphrase"),
-        api.storage.get<number>("pollIntervalSeconds"),
         isConfigured(),
-        api.storage.get<string>("cfAccountId"),
-        api.storage.get<string>("cfWorkerName"),
-        api.storage.get<string>("cfBucketName"),
       ]);
-      setWorkerUrl(url ?? "");
-      setToken(tok ?? "");
-      setPassphrase(pass ?? "");
-      setPollSeconds(poll ?? 60);
       setConfigured(cfg);
-      setCfAccountId(accountId ?? "");
-      setCfWorkerName(workerName || DEFAULT_WORKER_NAME);
-      setCfBucketName(bucketName || DEFAULT_BUCKET_NAME);
-      setTick((n) => n + 1);
       const localId = await getDeviceId();
       setLocalDeviceId(localId);
       if (cfg && url && tok) {
@@ -134,39 +120,26 @@ export function createSettingsPage(api: PluginAPI) {
     }, [api]);
 
     useEffect(() => {
+      void (async () => {
+        const [url, tok, pass, poll, accountId, workerName, bucketName] = await Promise.all([
+          api.storage.get<string>("workerUrl"),
+          api.vault.get("syncToken"),
+          api.vault.get("passphrase"),
+          api.storage.get<number>("pollIntervalSeconds"),
+          api.storage.get<string>("cfAccountId"),
+          api.storage.get<string>("cfWorkerName"),
+          api.storage.get<string>("cfBucketName"),
+        ]);
+        setWorkerUrl(url ?? "");
+        setToken(tok ?? "");
+        setPassphrase(pass ?? "");
+        setPollSeconds(poll ?? 60);
+        setCfAccountId(accountId ?? "");
+        setCfWorkerName(workerName || DEFAULT_WORKER_NAME);
+        setCfBucketName(bucketName || DEFAULT_BUCKET_NAME);
+      })();
       void refresh();
     }, [refresh]);
-
-    const loadedRef = React.useRef(false);
-    React.useEffect(() => {
-      loadedRef.current = true;
-    }, []);
-
-    const urlSave = useAutosave({
-      onSave: () => api.storage.set("workerUrl", workerUrl.replace(/\/+$/, "")),
-      canSave: () => loadedRef.current,
-    });
-    const tokenSave = useAutosave({
-      onSave: () => api.vault.set("syncToken", token),
-      canSave: () => loadedRef.current,
-    });
-    const passSave = useAutosave({
-      onSave: () => api.vault.set("passphrase", passphrase),
-      canSave: () => loadedRef.current,
-    });
-
-    React.useEffect(() => {
-      urlSave.markDirty();
-      return urlSave.schedule();
-    }, [workerUrl]);
-    React.useEffect(() => {
-      tokenSave.markDirty();
-      return tokenSave.schedule();
-    }, [token]);
-    React.useEffect(() => {
-      passSave.markDirty();
-      return passSave.schedule();
-    }, [passphrase]);
 
     async function run(action: () => Promise<void>, okMsg: string) {
       setBusy(true);
@@ -301,10 +274,10 @@ export function createSettingsPage(api: PluginAPI) {
               variant="secondary"
               disabled={busy || deployBusy}
               onClick={() => {
-                const next = generateSyncToken();
-                setToken(next);
-                void api.vault.set("syncToken", next);
-                api.notifications.toast("Generated sync token (saved to vault)", { severity: "success" });
+                setToken(generateSyncToken());
+                api.notifications.toast("Generated sync token (saved when you create or link a vault)", {
+                  severity: "success",
+                });
               }}
             >
               Generate sync token
@@ -330,10 +303,11 @@ export function createSettingsPage(api: PluginAPI) {
                       bucketName: cfBucketName,
                       syncToken: token,
                     });
-                                        if (result.workerUrl) {
+                    if (result.workerUrl) {
                       setWorkerUrl(result.workerUrl);
-                      await api.storage.set("workerUrl", result.workerUrl.replace(/\/+$/, ""));
-                      setMessage(`Worker deployed: ${result.workerUrl}`);
+                      setMessage(
+                        `Worker deployed: ${result.workerUrl}. Enter a passphrase, then Create vault or Link existing.`,
+                      );
                       api.notifications.toast("Worker deployed", { severity: "success" });
                     } else {
                       setMessage(
@@ -343,7 +317,6 @@ export function createSettingsPage(api: PluginAPI) {
                         severity: "warning",
                       });
                     }
-                    await refresh();
                   } catch (err) {
                     const msg =
                       err instanceof CloudflareDeployError || err instanceof Error
@@ -383,6 +356,9 @@ export function createSettingsPage(api: PluginAPI) {
 
         <section className="flex flex-col gap-3">
           <h3 className="text-sm font-semibold text-(--t-text-primary)">Connection</h3>
+          <p className="text-xs text-(--t-text-dim)">
+            These values are saved only when Create vault or Link existing succeeds.
+          </p>
           <Field label="Worker URL" hint="Example: https://voltius-sync.example.workers.dev">
             <input
               className={textInputClass()}
@@ -390,7 +366,6 @@ export function createSettingsPage(api: PluginAPI) {
               onChange={(e) => setWorkerUrl(e.target.value)}
               placeholder="https://your-worker.workers.dev"
             />
-            <SaveHint state={urlSave.saveState} />
           </Field>
           <Field label="Sync token" hint="Bearer token configured as SYNC_TOKEN on the Worker">
             <input
@@ -400,7 +375,6 @@ export function createSettingsPage(api: PluginAPI) {
               onChange={(e) => setToken(e.target.value)}
               placeholder="Long random secret"
             />
-            <SaveHint state={tokenSave.saveState} />
           </Field>
           <Field
             label="Encryption passphrase"
@@ -413,7 +387,6 @@ export function createSettingsPage(api: PluginAPI) {
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder="Strong passphrase"
             />
-            <SaveHint state={passSave.saveState} />
           </Field>
           <div className="flex flex-wrap gap-2">
             <Btn
@@ -566,21 +539,13 @@ export function createSettingsPage(api: PluginAPI) {
         {error ? <p className="text-sm text-(--t-status-error)">{error}</p> : null}
 
         <p className="text-[11px] text-(--t-text-dim)">
-          Worker source: mrchatam/voltius-cloudflare-sync-worker · Tracking: VoltiusApp/voltius#267
-          (marketplace-only). Prefer <strong className="font-medium">Deploy Worker</strong> above;
-          use Copy Deploy-to-Cloudflare URL if you want the dashboard flow.
+          <strong className="font-medium">Deploy Worker</strong> uploads the Worker bundled into this
+          plugin at build time (<code className="text-[10px]">worker/</code>).{" "}
+          <strong className="font-medium">Copy Deploy-to-Cloudflare URL</strong> still points at{" "}
+          mrchatam/voltius-cloudflare-sync-worker for the dashboard / Wrangler path. Tracking:{" "}
+          VoltiusApp/voltius#267.
         </p>
       </div>
     );
   };
-}
-
-function SaveHint({ state }: { state: SaveState }) {
-  if (state === "saving" || state === "dirty") {
-    return <Icon icon="lucide:loader-circle" width={13} className="animate-spin text-(--t-text-dim)" />;
-  }
-  if (state === "saved") {
-    return <Icon icon="lucide:check" width={13} className="text-(--t-status-connected)" />;
-  }
-  return null;
 }

@@ -1,9 +1,9 @@
 {
   "id": "plugin-cloudflare-sync",
   "name": "Cloudflare Sync",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "minAppVersion": "0.34.0",
-  "description": "BYO Cloudflare Worker + R2 encrypted vault sync \u2014 own your store, no GitHub PAT, deploy from Settings. Prefer over Gist when you want self-hosted object storage with the same on-device E2EE.",
+  "description": "BYO Cloudflare Worker + R2 encrypted vault sync — own your store, no GitHub PAT, deploy from Settings. Prefer over Gist when you want self-hosted object storage with the same on-device E2EE.",
   "permissions": [
     "vault:read",
     "vault:write",
@@ -11,10 +11,8 @@
     "http",
     "crypto:derive",
     "ui",
-    "sync:read",
     "sync:write",
     "notifications",
     "settings-page"
-  ],
-  "defaultEnabled": false
+  ]
 }
